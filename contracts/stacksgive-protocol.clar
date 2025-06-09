@@ -104,3 +104,121 @@
     (>= (get role role-data) required-role)
   )
 )
+
+;; Milestone tracking for beneficiary progress
+(define-private (get-last-milestone (beneficiary-id uint))
+  (var-get utilization-count)
+)
+
+;; ROLE MANAGEMENT & GOVERNANCE FUNCTIONS
+
+;; Assign hierarchical roles with security checks
+(define-public (set-role
+    (user principal)
+    (new-role uint)
+  )
+  (let ((existing-role (default-to u0 (get role (map-get? roles { user: user })))))
+    (if (and
+        (is-eq tx-sender (var-get contract-owner))
+        (<= new-role ROLE-BENEFICIARY)
+        (not (is-eq user tx-sender)) ;; Prevent self-role assignment
+        (or
+          (is-eq new-role ROLE-ADMIN)
+          (is-eq new-role ROLE-MODERATOR)
+          (is-eq new-role ROLE-BENEFICIARY)
+        )
+      )
+      (ok (map-set roles { user: user } { role: new-role }))
+      ERR-NOT-AUTHORIZED
+    )
+  )
+)
+
+;; Revoke user roles with owner protection
+(define-public (remove-role (user principal))
+  (if (and
+      (is-eq tx-sender (var-get contract-owner))
+      (is-some (map-get? roles { user: user }))
+      (not (is-eq user tx-sender))
+    )
+    ;; Prevent self-role removal
+    (ok (map-delete roles { user: user }))
+    ERR-NOT-AUTHORIZED
+  )
+)
+
+;; BENEFICIARY REGISTRATION & MANAGEMENT
+
+;; Register vetted beneficiaries with funding targets
+(define-public (register-beneficiary
+    (name (string-utf8 50))
+    (description (string-utf8 255))
+    (target-amount uint)
+  )
+  (let ((beneficiary-id (+ (var-get beneficiary-count) u1)))
+    (if (and
+        (is-authorized tx-sender ROLE-MODERATOR)
+        (> (len name) u0)
+        (> (len description) u0)
+        (> target-amount u0)
+      )
+      (begin
+        (map-set beneficiaries { id: beneficiary-id } {
+          name: name,
+          description: description,
+          target-amount: target-amount,
+          received-amount: u0,
+          status: "active",
+        })
+        (var-set beneficiary-count beneficiary-id)
+        (ok beneficiary-id)
+      )
+      ERR-INVALID-INPUT
+    )
+  )
+)
+
+;; Retrieve comprehensive beneficiary information
+(define-read-only (get-beneficiary (id uint))
+  (match (map-get? beneficiaries { id: id })
+    beneficiary (ok beneficiary)
+    ERR-BENEFICIARY-NOT-FOUND
+  )
+)
+
+;; DONATION PROCESSING & TRACKING
+
+;; Process secure donations with automatic tracking
+(define-public (donate
+    (beneficiary-id uint)
+    (amount uint)
+  )
+  (let ((beneficiary (unwrap! (get-beneficiary beneficiary-id) ERR-BENEFICIARY-NOT-FOUND)))
+    (if (and
+        (> amount u0)
+        (< beneficiary-id (var-get beneficiary-count)) ;; Validate beneficiary ID
+        (is-some (map-get? beneficiaries { id: beneficiary-id }))
+      )
+      (match (stx-transfer? amount tx-sender (as-contract tx-sender))
+        success (begin
+          ;; Update beneficiary received amount
+          (map-set beneficiaries { id: beneficiary-id }
+            (merge beneficiary { received-amount: (+ (get received-amount beneficiary) amount) })
+          )
+          ;; Record immutable donation transaction
+          (map-set donations { id: (+ (var-get donation-count) u1) } {
+            donor: tx-sender,
+            beneficiary-id: beneficiary-id,
+            amount: amount,
+            timestamp: stacks-block-height,
+          })
+          (var-set donation-count (+ (var-get donation-count) u1))
+          (ok true)
+        )
+        error
+        ERR-INSUFFICIENT-FUNDS
+      )
+      ERR-INVALID-INPUT
+    )
+  )
+)
